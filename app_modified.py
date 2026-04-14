@@ -292,20 +292,13 @@ if metadata_json and ocr_text_output:
     st.markdown("### Final JSON")
     st.json(final_json)
 
-    # Prevent duplicate inserts on Streamlit reruns
-    signature = hashlib.md5(
-        json.dumps(final_json, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-
-    if st.session_state.get("last_uploaded_signature") != signature:
+    # Manual save button instead of auto upload
+    if st.button("💾 Save to Google Sheet"):
         try:
             upload_json_to_sheet(final_json)
-            st.session_state["last_uploaded_signature"] = signature
             st.success("✅ Merged JSON saved to Google Sheet")
         except Exception as e:
             st.error(f"❌ Google Sheet upload failed: {e}")
-    else:
-        st.info("This merged JSON has already been saved to the sheet.")
 
     st.download_button(
         "📥 Download JSON",
@@ -317,4 +310,3 @@ else:
     st.info("📌 Upload both OCR PDF(s) and Metadata PDF to auto-merge")
 
 st.markdown("</div>", unsafe_allow_html=True)
-
