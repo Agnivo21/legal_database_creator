@@ -1,0 +1,35 @@
+# ── Python cache ──────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ───────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Local test data ────────────────────────────
+pdfs/
+*.pdf
+cases_metadata.json
+final_case.json
+
+# ── Secrets — NEVER bake into image ───────────
+credentials.json
+
+# ── Git & IDE ──────────────────────────────────
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# ── OS junk ───────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Docs ──────────────────────────────────────
+readme.md
+*.md

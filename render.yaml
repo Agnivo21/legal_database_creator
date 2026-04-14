@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: court-case-ai-system
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render injects $PORT — Streamlit is told to use 8501 in CMD,
+    # but Render's router forwards external traffic to whatever port
+    # the container listens on. 8501 is fine for Docker deploys.
+    plan: free            # change to "starter" for always-on
+    healthCheckPath: /    # Streamlit serves / — used by Render health checks
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    # Secret Files are added in the Render dashboard (not here).
+    # See deployment guide for credentials.json setup.

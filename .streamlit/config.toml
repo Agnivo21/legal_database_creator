@@ -1,0 +1,10 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+address = "0.0.0.0"
+port = 8501
+
+[browser]
+# Prevents Streamlit from opening a browser tab
+gatherUsageStats = false
