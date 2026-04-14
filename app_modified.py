@@ -96,7 +96,7 @@ def clean_text(text: str) -> str:
 
 
 def ocr_pdf(file_bytes, lang, psm_mode):
-    images = convert_from_bytes(file_bytes, dpi=300)
+    images = convert_from_bytes(file_bytes, dpi=150)
     full_text = ""
     for img in images:
         img   = np.array(img)
