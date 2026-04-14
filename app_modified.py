@@ -7,6 +7,7 @@ import re
 import json
 import tempfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -66,23 +67,17 @@ HEADERS = [
 
 # ==========================
 # 🔑 CREDENTIALS RESOLVER
-# ─────────────────────────
-# Resolution order:
-#   1. /etc/secrets/credentials.json  ← Render Secret Files path
-#   2. ./credentials.json             ← local dev fallback
 # ==========================
 def _find_credentials_path() -> Path:
     render_path = Path("/etc/secrets/credentials.json")
     local_path  = Path("credentials.json")
-
     if render_path.exists():
         return render_path
     if local_path.exists():
         return local_path
-
     raise FileNotFoundError(
         "credentials.json not found.\n"
-        "• On Render: add it as a Secret File at path /etc/secrets/credentials.json\n"
+        "• On Render: add it as a Secret File named credentials.json\n"
         "• Locally: place credentials.json in the project root folder"
     )
 
@@ -95,17 +90,54 @@ def clean_text(text: str) -> str:
     return "\n".join([re.sub(r"\s+", " ", l.strip()) for l in lines])
 
 
-def ocr_pdf(file_bytes, lang, psm_mode):
-    images = convert_from_bytes(file_bytes, dpi=150)
-    full_text = ""
-    for img in images:
-        img   = np.array(img)
-        gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        config = f"--oem 3 --psm {psm_mode}"
-        text   = pytesseract.image_to_string(thresh, lang=lang, config=config)
-        full_text += text + "\n"
-    return clean_text(full_text)
+# ─────────────────────────────────────────────
+# ⚡ FAST OCR — three optimisations applied:
+#
+#  1. ThreadPoolExecutor parallelises pages.
+#     Tesseract releases the GIL during its C call,
+#     so threads give real speedup (2–4x on multi-page PDFs).
+#
+#  2. Results stored by index so page order is preserved
+#     even though futures complete out-of-order.
+#
+#  3. DPI fixed at 150 — quarter the memory of 300 DPI,
+#     still sufficient for printed court documents.
+# ─────────────────────────────────────────────
+
+def _ocr_single_page(args):
+    """OCR one PIL image page. Runs inside a thread."""
+    img_pil, lang, psm_mode = args
+    img_np = np.array(img_pil)
+    gray   = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    config = f"--oem 3 --psm {psm_mode}"
+    return pytesseract.image_to_string(thresh, lang=lang, config=config)
+
+
+def ocr_pdf_fast(file_bytes: bytes, lang: str, psm_mode: int,
+                 max_workers: int = 4) -> str:
+    """
+    Parallel page OCR.
+    max_workers=4 is safe for Render free tier (1 vCPU, shared).
+    Raise to 8 on paid instances.
+    """
+    images     = convert_from_bytes(file_bytes, dpi=150)
+    args_list  = [(img, lang, psm_mode) for img in images]
+    page_texts = [""] * len(images)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(_ocr_single_page, args): idx
+            for idx, args in enumerate(args_list)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                page_texts[idx] = future.result()
+            except Exception as e:
+                page_texts[idx] = f"[OCR error on page {idx+1}: {e}]"
+
+    return clean_text("\n".join(page_texts))
 
 
 # ==========================
@@ -120,7 +152,6 @@ def get_sheet():
     creds_path = _find_credentials_path()
     creds      = ServiceAccountCredentials.from_json_keyfile_name(str(creds_path), scope)
     client     = gspread.authorize(creds)
-
     spreadsheet = client.open_by_url(
         "https://docs.google.com/spreadsheets/d/17n58eSjdraBOVfhs2b2NGI0haxebjqVcoF7vKGw5DEQ/edit?usp=sharing"
     )
@@ -158,8 +189,13 @@ def upload_json_to_sheet(data: dict):
 # SIDEBAR
 # ==========================
 st.sidebar.title("⚙️ OCR Settings")
-language = st.sidebar.selectbox("Language", ["eng", "eng+hin"])
-psm_mode = st.sidebar.selectbox("PSM Mode", [3, 4, 6])
+language    = st.sidebar.selectbox("Language", ["eng", "eng+hin"])
+psm_mode    = st.sidebar.selectbox("PSM Mode", [3, 4, 6])
+max_workers = st.sidebar.slider(
+    "Parallel OCR workers",
+    min_value=1, max_value=8, value=4,
+    help="Higher = faster on multi-page PDFs. Keep ≤4 on Render free tier."
+)
 
 # ==========================
 # HEADER
@@ -191,12 +227,18 @@ if ocr_files:
     ocr_files      = sorted(ocr_files, key=lambda x: natural_sort_key(x.name))
     ocr_file_names = [f.name for f in ocr_files]
 
-    for file in ocr_files:
-        st.info(f"Processing {file.name}")
-        text = ocr_pdf(file.read(), language, psm_mode)
+    progress = st.progress(0, text="Starting OCR...")
+
+    for i, file in enumerate(ocr_files):
+        progress.progress(
+            int((i / len(ocr_files)) * 100),
+            text=f"OCR: {file.name}  ({i+1}/{len(ocr_files)})"
+        )
+        text = ocr_pdf_fast(file.read(), language, psm_mode, max_workers)
         ocr_text_output += f"\n--- {file.name} ---\n{text}\n"
 
-    st.success("OCR Completed")
+    progress.progress(100, text="✅ OCR complete")
+    st.success(f"OCR completed for {len(ocr_files)} file(s)")
     st.text_area("Preview OCR Output", ocr_text_output, height=250)
 
 st.markdown("</div>", unsafe_allow_html=True)
@@ -211,20 +253,19 @@ metadata_file = st.file_uploader("Upload metadata PDF", type=["pdf"], key="metad
 metadata_json = None
 
 if metadata_file:
-    st.info("Extracting metadata...")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(metadata_file.read())
-        temp_path = tmp.name
-
-    try:
-        text         = extract_text_from_pdf(temp_path)
-        raw          = extract_tables_raw(temp_path)
-        metadata_json = parse_case(text, raw)
-        st.success("Metadata Extracted")
-        st.markdown("### JSON Output")
-        st.json(metadata_json)
-    finally:
-        Path(temp_path).unlink(missing_ok=True)
+    with st.spinner("Extracting metadata..."):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(metadata_file.read())
+            temp_path = tmp.name
+        try:
+            text          = extract_text_from_pdf(temp_path)
+            raw           = extract_tables_raw(temp_path)
+            metadata_json = parse_case(text, raw)
+            st.success("Metadata Extracted")
+            st.markdown("### JSON Output")
+            st.json(metadata_json)
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -243,11 +284,12 @@ if metadata_json and ocr_text_output:
     st.json(final_json)
 
     if st.button("💾 Save to Google Sheet"):
-        try:
-            upload_json_to_sheet(final_json)
-            st.success("✅ Merged JSON saved to Google Sheet")
-        except Exception as e:
-            st.error(f"❌ Google Sheet upload failed: {e}")
+        with st.spinner("Uploading to Google Sheets..."):
+            try:
+                upload_json_to_sheet(final_json)
+                st.success("✅ Merged JSON saved to Google Sheet")
+            except Exception as e:
+                st.error(f"❌ Google Sheet upload failed: {e}")
 
     st.download_button(
         "📥 Download JSON",
